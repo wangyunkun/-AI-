@@ -40,7 +40,7 @@ DEFAULT_PROMPTS = {
    - 公式：D = L(可能性) × E(暴露频率) × C(后果严重度)
    - **L (Likelihood)**: 10(完全可能/常发), 6(相当可能), 3(可能/偶然), 1(可能性小).
    - **E (Exposure)**: 10(连续暴露), 6(每日工作时间/常驻), 3(每周一次), 1(极少). *注：施工现场隐患 E值通常默认为 6 或 10*。
-   - **C (Consequence)**: 100(10人以上死亡/群死群伤), 40(1-2人死亡), 15(重伤/致残), 7(轻伤), 1(仅设备损毁).
+   - **C (Consequence)**: 100分：10人以上死亡。40分：3～9人死亡。15分：1～2人死亡。7分：严重事故。3分：重大伤残。.
    - **分级阈值**:
      - **重大风险 (D ≥ 320)**: 必须立即停工整改。
      - **较大风险 (160≤ D < 320)**: 需限期整改。
@@ -226,49 +226,55 @@ class WordReportGenerator:
 
     @staticmethod
     def generate(tasks, save_path):
-        doc = Document()
-        section = doc.sections[0]
-        section.top_margin = Cm(2.0)
-        section.bottom_margin = Cm(2.0)
-        section.left_margin = Cm(2.0)
-        section.right_margin = Cm(2.0)
+        # [核心修改] 尝试加载模板
+        template_name = "模板.docx"
+        if os.path.exists(template_name):
+            doc = Document(template_name)
+            # 如果有模板，我们通常跳过页面边距设置，沿用模板的设置
+            print(f"已加载模板: {template_name}")
 
-        # 标题
-        title_para = doc.add_paragraph()
-        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = title_para.add_run("施工现场安全隐患排查报告 (LEC版)")
-        WordReportGenerator.set_font(run, size=18, bold=True)
+            # 可以在模板末尾加个分页符，防止内容紧贴封面
+            doc.add_page_break()
+        else:
+            # 没模板，创建新文档并设置边距
+            doc = Document()
+            section = doc.sections[0]
+            section.top_margin = Cm(2.0)
+            section.bottom_margin = Cm(2.0)
+            section.left_margin = Cm(2.0)
+            section.right_margin = Cm(2.0)
 
-        # 概况表
-        info_table = doc.add_table(rows=1, cols=2)
-        info_table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        info_table.width = Inches(6.5)
+            # 手动添加简易标题（因为没模板）
+            title_para = doc.add_paragraph()
+            title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = title_para.add_run("智能隐患排查报告")
+            WordReportGenerator.set_font(run, size=18, bold=True)
+            doc.add_paragraph()
 
-        c1 = info_table.cell(0, 0)
-        r1 = c1.paragraphs[0].add_run(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        WordReportGenerator.set_font(r1, size=10)
+        # --- 概况信息 (追加到文档中) ---
+        # 如果你希望封面由模板决定，可以注释掉下面这段概况表代码
+        # 或者保留它作为正文第一部分
+        info_para = doc.add_paragraph()
+        info_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run_time = info_para.add_run(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')} | 点位：{len(tasks)}个")
+        WordReportGenerator.set_font(run_time, size=9, color=RGBColor(100, 100, 100))
 
-        c2 = info_table.cell(0, 1)
-        p2 = c2.paragraphs[0]
-        p2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        r2 = p2.add_run(f"排查点位：{len(tasks)} 个")
-        WordReportGenerator.set_font(r2, size=10)
+        doc.add_paragraph()  # 空行
 
-        doc.add_paragraph()
-
+        # --- 循环生成具体内容 (逻辑不变) ---
         for idx, task in enumerate(tasks, 1):
-            # 标题条
+            # 1. 点位标题条
             title_table = doc.add_table(rows=1, cols=1)
             title_table.style = 'Table Grid'
             title_cell = title_table.cell(0, 0)
             WordReportGenerator.set_cell_shading(title_cell, "F2F2F2")
 
             p = title_cell.paragraphs[0]
-            run = p.add_run(f"NO.{idx}  点位：{task['name']}")
+            run = p.add_run(f"NO.{idx}  点位名称：{task['name']}")
             WordReportGenerator.set_font(run, size=12, bold=True)
             doc.add_paragraph()
 
-            # 图片
+            # 2. 图片
             img_para = doc.add_paragraph()
             img_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
             if os.path.exists(task['path']):
@@ -278,12 +284,12 @@ class WordReportGenerator:
                     run = img_para.add_run("[图片损坏]")
                     WordReportGenerator.set_font(run, color=RGBColor(255, 0, 0))
             else:
-                img_para.add_run("[图片丢失]")
+                img_para.add_run("[图片路径不存在]")
             doc.add_paragraph()
 
-            # 表格
+            # 3. 表格
             data = task.get('data', [])
-            headers = ["LEC风险等级", "隐患描述 (D=LxExC)", "违规依据", "整改建议"]
+            headers = ["风险/指数等级", "详细描述", "依据标准/常识", "整改或优化建议"]
             widths = [Cm(2.5), Cm(6.0), Cm(3.8), Cm(4.5)]
 
             table = doc.add_table(rows=1, cols=4)
@@ -301,19 +307,19 @@ class WordReportGenerator:
                 WordReportGenerator.set_cell_shading(hdr_cells[i], "E7E6E6")
                 hdr_cells[i].width = widths[i]
 
+            # 内容填充
             if not data or isinstance(data, str) or len(data) == 0:
                 row = table.add_row()
                 cell = row.cells[0]
                 cell.merge(row.cells[3])
                 p = cell.paragraphs[0]
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                run = p.add_run("AI 未发现明显隐患。")
+                run = p.add_run("AI 未发现明显隐患或改进项。")
                 WordReportGenerator.set_font(run, color=RGBColor(0, 128, 0))
             else:
                 for item in data:
                     row_cells = table.add_row().cells
 
-                    # 风险列
                     level = item.get("risk_level", "一般")
                     cell_risk = row_cells[0]
                     p_risk = cell_risk.paragraphs[0]
@@ -321,16 +327,16 @@ class WordReportGenerator:
                     run_risk = p_risk.add_run(level)
                     WordReportGenerator.set_font(run_risk, bold=True, size=10.5)
 
-                    if "重大" in level:
+                    # 智能配色
+                    if any(x in level for x in ["重大", "严重", "High", "警示"]):
                         WordReportGenerator.set_cell_shading(cell_risk, "FF0000")
                         run_risk.font.color.rgb = RGBColor(255, 255, 255)
-                    elif "较大" in level:
+                    elif any(x in level for x in ["较大", "需整理", "需改善", "Medium"]):
                         WordReportGenerator.set_cell_shading(cell_risk, "FFC000")
                         run_risk.font.color.rgb = RGBColor(255, 255, 255)
                     else:
                         run_risk.font.color.rgb = RGBColor(0, 0, 0)
 
-                    # 内容列
                     contents = [item.get("issue", ""), item.get("regulation", ""), item.get("correction", "")]
                     for j, txt in enumerate(contents):
                         cell = row_cells[j + 1]
