@@ -1052,6 +1052,123 @@ class AnnotatableImageView(QGraphicsView):
 
         super().mouseReleaseEvent(event)
 
+        def mouseReleaseEvent(self, event):
+            if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+                self._dragging = False
+                end_pt = self._to_img_point(event.position().toPoint())
+                start_pt = self._start_img_pt or end_pt
+
+                # 创建数据结构
+                new_data = None
+
+                if self._tool in [self.TOOL_RECT, self.TOOL_ELLIPSE]:
+                    x1, y1 = start_pt.x(), start_pt.y()
+                    x2, y2 = end_pt.x(), end_pt.y()
+                    x1, x2 = sorted([x1, x2])
+                    y1, y2 = sorted([y1, y2])
+                    if (x2 - x1) >= 3 and (y2 - y1) >= 3:
+                        new_data = {
+                            "type": self._tool,
+                            "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                            "color": self._draw_color,
+                            "width": self._draw_width
+                        }
+
+                elif self._tool == self.TOOL_ARROW:
+                    if (abs(end_pt.x() - start_pt.x()) + abs(end_pt.y() - start_pt.y())) >= 3:
+                        new_data = {
+                            "type": "arrow",
+                            "p1": [int(start_pt.x()), int(start_pt.y())],
+                            "p2": [int(end_pt.x()), int(end_pt.y())],
+                            "color": self._draw_color,
+                            "width": self._draw_width
+                        }
+
+                elif self._tool == self.TOOL_TEXT:
+                    text, ok = self._prompt_text()
+                    if ok and text.strip():
+                        new_data = {
+                            "type": "text",
+                            "pos": [int(end_pt.x()), int(end_pt.y())],
+                            "text": text.strip(),
+                            "color": self._draw_color,
+                            "width": max(2, self._draw_width // 2),
+                            "font_size": 28
+                        }
+
+                elif self._tool == self.TOOL_ISSUE_TAG:
+                    if not self._current_issues_data:
+                        QMessageBox.warning(self, "提示", "当前图片没有AI识别出的问题，无法引用。")
+                    else:
+                        dlg = IssueSelectionDialog(self, self._current_issues_data)
+                        if dlg.exec() == QDialog.DialogCode.Accepted:
+                            new_data = {
+                                "type": "text",  # 注意这里：引用标签也是 text 类型
+                                "pos": [int(end_pt.x()), int(end_pt.y())],
+                                "text": dlg.selected_text,
+                                "color": dlg.selected_color,
+                                "width": 4,
+                                "font_size": 36
+                            }
+
+                # 如果生成了数据，立即转换为 Scene Item
+                if new_data:
+                    self._create_graphics_item_from_data(new_data)
+                    self.annotation_changed.emit()
+
+                self._start_img_pt = None
+                self._temp_end_img_pt = None
+                self.viewport().update()
+                return
+
+            super().mouseReleaseEvent(event)
+
+        # =============== 重点修改位置 ===============
+        # 必须确保这个函数靠左对齐，与上面的 def mouseReleaseEvent 平级
+        # 绝不能缩进在上面的函数里面
+        # ==========================================
+    def mouseDoubleClickEvent(self, event):
+        """
+        双击事件：同时支持修改 [手动文字] 和 [引用标签]
+        """
+         # 1. 获取点击位置
+        click_pos = event.position().toPoint()
+        sp = self.mapToScene(click_pos)
+
+         # 2. 扩大搜索范围，防止点不准
+        search_rect = QRectF(sp.x() - 10, sp.y() - 10, 20, 20)
+        items = self.scene().items(search_rect)
+
+        for item in items:
+            # 3. 寻找文字图元
+             if isinstance(item, QGraphicsTextItem):
+                data = item.data(Qt.ItemDataRole.UserRole)
+
+                # 只要 type 是 text，无论是手动输入的还是标签引用的，都进入编辑模式
+                if data and isinstance(data, dict) and data.get("type") == "text":
+
+                # 获取旧文本
+                    old_text = item.toPlainText()
+
+                # 弹出输入框
+                    new_text, ok = self._prompt_text(old_text)
+
+                if ok and new_text.strip():
+                     # 更新显示内容（保留微透明背景以维持点击区域）
+                    item.setHtml(
+                    f"<div style='background-color:rgba(255,255,255,0.01);'>{new_text.strip()}</div>")
+
+                    # 更新底层数据
+                    data["text"] = new_text.strip()
+                    item.setData(Qt.ItemDataRole.UserRole, data)
+
+                    self.annotation_changed.emit()
+                    self.viewport().update()
+                    return  # 只要处理了一个文字，就停止处理，防止重叠时触发多次
+
+                super().mouseDoubleClickEvent(event)
+
+
     def _create_graphics_item_from_data(self, data: Dict[str, Any]):
         """根据数据字典创建可移动的 QGraphicsItem"""
         t = data.get("type")
@@ -1109,21 +1226,38 @@ class AnnotatableImageView(QGraphicsView):
             data["orig_p1"] = p1
             data["orig_p2"] = p2
 
+
         elif t == "text":
+
             text = data.get("text", "")
+
             pos = data.get("pos")
+
             item = QGraphicsTextItem(text)
 
             # 字体设置
+
             f = QFont()
+
             f.setPointSize(int(data.get("font_size", 28)))
+
             f.setBold(True)
+
             item.setFont(f)
+
             item.setDefaultTextColor(color)
+
             item.setPos(pos[0], pos[1])
 
-            # 文本背景可选，这里为了清晰加个半透明底（可选）
-            # item.setHtml(f"<div style='background-color:rgba(255,255,255,0.7);'>{text}</div>")
+            # --- 关键修改：增加这三行，让文字块变得“容易被点中” ---
+
+            # 禁用文字内部的编辑模式，防止拦截双击事件
+
+            item.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+
+            # 设置一个极其微弱的背景色（透明度为1），肉眼看不见，但会让整个矩形区域可点击
+
+            item.setHtml(f"<div style='background-color:rgba(255,255,255,0.01);'>{text}</div>")
 
         if item:
             # 【关键】：设置标志，允许鼠标拖动和选中
@@ -1133,18 +1267,28 @@ class AnnotatableImageView(QGraphicsView):
             item.setData(Qt.ItemDataRole.UserRole, data)
             self.scene().addItem(item)
 
-    def _prompt_text(self) -> Tuple[str, bool]:
+    def _prompt_text(self, default_text="") -> Tuple[str, bool]:
         dlg = QDialog(self)
-        dlg.setWindowTitle("输入标注文字")
+        dlg.setWindowTitle("输入/修改标注")
         dlg.resize(420, 160)
         layout = QVBoxLayout(dlg)
         edit = QLineEdit()
-        edit.setPlaceholderText("例如：钢筋外露 / 临边无防护 / 请立即整改")
+        edit.setPlaceholderText("例如：钢筋外露 / 临边无防护")
+
+        # 关键：如果有旧文本，先填进去
+        if default_text:
+            edit.setText(default_text)
+
         layout.addWidget(edit)
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
         layout.addWidget(btns)
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
+
+        # 自动聚焦并全选，方便直接打字覆盖
+        edit.setFocus()
+        edit.selectAll()
+
         ok = dlg.exec() == QDialog.DialogCode.Accepted
         return edit.text(), ok
 
