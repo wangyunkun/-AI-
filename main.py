@@ -33,7 +33,9 @@ from PyQt6.QtGui import (
 
 # === Graphics 组件 ===
 from PyQt6.QtWidgets import (
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
+    QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem,
+    QGraphicsTextItem, QGraphicsItem
 )
 
 CONFIG_FILE = "app_config_lec.json"
@@ -777,30 +779,24 @@ class AnalysisWorker(QThread):
             })
 
 
-# ================= 8. 图片标注组件 (修改版：支持拖动) =================
-
-from PyQt6.QtWidgets import (
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-    QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem,
-    QGraphicsTextItem, QGraphicsItem
-)
-from PyQt6.QtGui import QPainterPath
-
+# ================= 8. 图片标注组件 (修改版：支持拖动 + 放大镜) =================
 
 class AnnotatableImageView(QGraphicsView):
     """
     - 显示图片
     - 支持用户绘制：rect/ellipse/arrow/text/issue_tag
-    - 【核心修改】：创建真正的 QGraphicsItem 以支持鼠标拖动调整位置
+    - 支持鼠标拖动调整位置
+    - 支持放大镜功能
     """
     annotation_changed = pyqtSignal()
-
+    tool_reset = pyqtSignal()
     TOOL_NONE = "none"
     TOOL_RECT = "rect"
     TOOL_ELLIPSE = "ellipse"
     TOOL_ARROW = "arrow"
     TOOL_TEXT = "text"
     TOOL_ISSUE_TAG = "issue_tag"
+    TOOL_MAGNIFIER = "magnifier"  # 新增放大镜工具
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -825,6 +821,11 @@ class AnnotatableImageView(QGraphicsView):
         self._start_img_pt: Optional[QPointF] = None
         self._temp_end_img_pt: Optional[QPointF] = None
 
+        # 放大镜相关
+        self._mouse_scene_pos: Optional[QPointF] = None
+        self._magnifier_factor = 2.0  # 放大倍数
+        self._magnifier_size = 500  # 放大镜尺寸 (直径或边长)
+
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing |
             QPainter.RenderHint.SmoothPixmapTransform
@@ -834,14 +835,44 @@ class AnnotatableImageView(QGraphicsView):
 
         # 允许框选拖拽
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setMouseTracking(True)  # 开启鼠标追踪以便放大镜跟随
 
     def set_tool(self, tool: str):
         self._tool = tool
         # 如果是浏览模式，允许手型拖动视图；绘图模式则禁用
         if tool == self.TOOL_NONE:
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        elif tool == self.TOOL_MAGNIFIER:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+        self.viewport().update()  # 刷新视图以清除/显示放大镜
+
+    def wheelEvent(self, event):
+        """
+        重写滚轮事件：
+        当处于 TOOL_NONE (缩放/移动) 模式时，滚轮用于缩放视图。
+        其他模式下，保持默认行为（通常是上下滚动滚动条）。
+        """
+        if self._tool == self.TOOL_NONE:
+            # 缩放因子：每次滚动放大/缩小 15%
+            zoom_in_factor = 1.15
+            zoom_out_factor = 1 / zoom_in_factor
+
+            # angleDelta().y() > 0 表示滚轮向前滚（放大）
+            if event.angleDelta().y() > 0:
+                self.scale(zoom_in_factor, zoom_in_factor)
+            else:
+                self.scale(zoom_out_factor, zoom_out_factor)
+
+            # 标记事件已处理，防止传递给父类导致滚动条移动
+            event.accept()
+        else:
+            super().wheelEvent(event)
 
     def set_image(self, path: str):
         self._img_path = path
@@ -877,13 +908,11 @@ class AnnotatableImageView(QGraphicsView):
 
     def get_user_annotations(self) -> List[Dict[str, Any]]:
         """
-        【核心修改】：导出时，遍历 Scene 中的 Item，获取其当前的真实坐标。
+        导出时，遍历 Scene 中的 Item，获取其当前的真实坐标。
         这样用户拖动后，导出的数据就是拖动后的位置。
         """
         annotations = []
         # 遍历场景中所有 Item
-        # 注意：scene.items() 包含所有 item，需要过滤掉底图
-        # 为了保持顺序，最好按照 ZValue 排序，或者简单的倒序
         items = self.scene().items(Qt.SortOrder.AscendingOrder)
 
         for item in items:
@@ -915,7 +944,6 @@ class AnnotatableImageView(QGraphicsView):
                 # 箭头作为一个整体 PathItem，位置就是 pos
                 # 简便做法：我们存储箭头创建时的相对路径，导出时加上 pos
                 # 但为了兼容 draw_user_annotations，我们需要更新 p1, p2
-                # 这是一个简化的处理：只更新整体偏移，不处理变形
                 orig_p1 = data.get("orig_p1", [0, 0])
                 orig_p2 = data.get("orig_p2", [0, 0])
                 data["p1"] = [int(orig_p1[0] + pos_offset.x()), int(orig_p1[1] + pos_offset.y())]
@@ -954,15 +982,13 @@ class AnnotatableImageView(QGraphicsView):
         return QPointF(x, y)
 
     def mousePressEvent(self, event):
+        # 如果是放大镜模式，不处理拖拽
+        if self._tool == self.TOOL_MAGNIFIER:
+            super().mousePressEvent(event)
+            return
+
         # 如果点击的是已有的可移动 Item，优先让 Qt 处理拖动
         item = self.itemAt(event.position().toPoint())
-        if item and item != self._pix_item and self._tool != self.TOOL_NONE:
-            # 如果当前在绘图模式，但点到了一个已存在的对象，
-            # 此时看需求：是优先选中移动，还是强制画新图？
-            # 通常逻辑：按住 Shift 强制画图，否则优先选中。
-            # 这里简化：只要选中了Item且Item可移动，就交给父类处理（移动）
-            # 除非当前是“绘图”操作开始
-            pass
 
         if event.button() == Qt.MouseButton.LeftButton and self._tool != self.TOOL_NONE:
             # 如果点击处没有可移动图元，或者我们想强制画图
@@ -975,6 +1001,14 @@ class AnnotatableImageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # 记录鼠标在 Scene 中的位置，供放大镜使用
+        self._mouse_scene_pos = self.mapToScene(event.position().toPoint())
+
+        if self._tool == self.TOOL_MAGNIFIER:
+            self.viewport().update()  # 触发 drawForeground 绘制放大镜
+            super().mouseMoveEvent(event)
+            return
+
         if self._dragging:
             self._temp_end_img_pt = self._to_img_point(event.position().toPoint())
             self.viewport().update()  # 触发 drawForeground 画临时框
@@ -1052,122 +1086,39 @@ class AnnotatableImageView(QGraphicsView):
 
         super().mouseReleaseEvent(event)
 
-        def mouseReleaseEvent(self, event):
-            if self._dragging and event.button() == Qt.MouseButton.LeftButton:
-                self._dragging = False
-                end_pt = self._to_img_point(event.position().toPoint())
-                start_pt = self._start_img_pt or end_pt
-
-                # 创建数据结构
-                new_data = None
-
-                if self._tool in [self.TOOL_RECT, self.TOOL_ELLIPSE]:
-                    x1, y1 = start_pt.x(), start_pt.y()
-                    x2, y2 = end_pt.x(), end_pt.y()
-                    x1, x2 = sorted([x1, x2])
-                    y1, y2 = sorted([y1, y2])
-                    if (x2 - x1) >= 3 and (y2 - y1) >= 3:
-                        new_data = {
-                            "type": self._tool,
-                            "bbox": [int(x1), int(y1), int(x2), int(y2)],
-                            "color": self._draw_color,
-                            "width": self._draw_width
-                        }
-
-                elif self._tool == self.TOOL_ARROW:
-                    if (abs(end_pt.x() - start_pt.x()) + abs(end_pt.y() - start_pt.y())) >= 3:
-                        new_data = {
-                            "type": "arrow",
-                            "p1": [int(start_pt.x()), int(start_pt.y())],
-                            "p2": [int(end_pt.x()), int(end_pt.y())],
-                            "color": self._draw_color,
-                            "width": self._draw_width
-                        }
-
-                elif self._tool == self.TOOL_TEXT:
-                    text, ok = self._prompt_text()
-                    if ok and text.strip():
-                        new_data = {
-                            "type": "text",
-                            "pos": [int(end_pt.x()), int(end_pt.y())],
-                            "text": text.strip(),
-                            "color": self._draw_color,
-                            "width": max(2, self._draw_width // 2),
-                            "font_size": 28
-                        }
-
-                elif self._tool == self.TOOL_ISSUE_TAG:
-                    if not self._current_issues_data:
-                        QMessageBox.warning(self, "提示", "当前图片没有AI识别出的问题，无法引用。")
-                    else:
-                        dlg = IssueSelectionDialog(self, self._current_issues_data)
-                        if dlg.exec() == QDialog.DialogCode.Accepted:
-                            new_data = {
-                                "type": "text",  # 注意这里：引用标签也是 text 类型
-                                "pos": [int(end_pt.x()), int(end_pt.y())],
-                                "text": dlg.selected_text,
-                                "color": dlg.selected_color,
-                                "width": 4,
-                                "font_size": 36
-                            }
-
-                # 如果生成了数据，立即转换为 Scene Item
-                if new_data:
-                    self._create_graphics_item_from_data(new_data)
-                    self.annotation_changed.emit()
-
-                self._start_img_pt = None
-                self._temp_end_img_pt = None
-                self.viewport().update()
-                return
-
-            super().mouseReleaseEvent(event)
-
-        # =============== 重点修改位置 ===============
-        # 必须确保这个函数靠左对齐，与上面的 def mouseReleaseEvent 平级
-        # 绝不能缩进在上面的函数里面
-        # ==========================================
     def mouseDoubleClickEvent(self, event):
         """
         双击事件：同时支持修改 [手动文字] 和 [引用标签]
         """
-         # 1. 获取点击位置
+        # 1. 获取点击位置
         click_pos = event.position().toPoint()
         sp = self.mapToScene(click_pos)
 
-         # 2. 扩大搜索范围，防止点不准
+        # 2. 扩大搜索范围，防止点不准
         search_rect = QRectF(sp.x() - 10, sp.y() - 10, 20, 20)
         items = self.scene().items(search_rect)
 
         for item in items:
             # 3. 寻找文字图元
-             if isinstance(item, QGraphicsTextItem):
+            if isinstance(item, QGraphicsTextItem):
                 data = item.data(Qt.ItemDataRole.UserRole)
-
                 # 只要 type 是 text，无论是手动输入的还是标签引用的，都进入编辑模式
                 if data and isinstance(data, dict) and data.get("type") == "text":
-
-                # 获取旧文本
+                    # 获取旧文本
                     old_text = item.toPlainText()
-
-                # 弹出输入框
+                    # 弹出输入框
                     new_text, ok = self._prompt_text(old_text)
-
-                if ok and new_text.strip():
-                     # 更新显示内容（保留微透明背景以维持点击区域）
-                    item.setHtml(
-                    f"<div style='background-color:rgba(255,255,255,0.01);'>{new_text.strip()}</div>")
-
-                    # 更新底层数据
-                    data["text"] = new_text.strip()
-                    item.setData(Qt.ItemDataRole.UserRole, data)
-
-                    self.annotation_changed.emit()
-                    self.viewport().update()
-                    return  # 只要处理了一个文字，就停止处理，防止重叠时触发多次
-
-                super().mouseDoubleClickEvent(event)
-
+                    if ok and new_text.strip():
+                        # 更新显示内容（保留微透明背景以维持点击区域）
+                        item.setHtml(
+                            f"<div style='background-color:rgba(255,255,255,0.01);'>{new_text.strip()}</div>")
+                        # 更新底层数据
+                        data["text"] = new_text.strip()
+                        item.setData(Qt.ItemDataRole.UserRole, data)
+                        self.annotation_changed.emit()
+                        self.viewport().update()
+                        return
+        super().mouseDoubleClickEvent(event)
 
     def _create_graphics_item_from_data(self, data: Dict[str, Any]):
         """根据数据字典创建可移动的 QGraphicsItem"""
@@ -1228,35 +1179,18 @@ class AnnotatableImageView(QGraphicsView):
 
 
         elif t == "text":
-
             text = data.get("text", "")
-
             pos = data.get("pos")
-
             item = QGraphicsTextItem(text)
-
-            # 字体设置
-
             f = QFont()
-
             f.setPointSize(int(data.get("font_size", 28)))
-
             f.setBold(True)
-
             item.setFont(f)
-
             item.setDefaultTextColor(color)
-
             item.setPos(pos[0], pos[1])
-
-            # --- 关键修改：增加这三行，让文字块变得“容易被点中” ---
-
             # 禁用文字内部的编辑模式，防止拦截双击事件
-
             item.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-
             # 设置一个极其微弱的背景色（透明度为1），肉眼看不见，但会让整个矩形区域可点击
-
             item.setHtml(f"<div style='background-color:rgba(255,255,255,0.01);'>{text}</div>")
 
         if item:
@@ -1296,7 +1230,7 @@ class AnnotatableImageView(QGraphicsView):
         # 移除了绘制已保存标注的循环，因为现在它们是 Scene 里的 Item 了
         super().drawForeground(painter, rect)
 
-        # 只绘制正在拖拽时的临时预览虚线
+        # 1. 绘制拖拽时的临时预览虚线
         if self._dragging and self._start_img_pt and self._temp_end_img_pt:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setPen(QPen(QColor("#00E5FF"), 4, Qt.PenStyle.DashLine))
@@ -1307,6 +1241,9 @@ class AnnotatableImageView(QGraphicsView):
             y1, y2 = sorted([s.y(), e.y()])
             r = QRectF(x1, y1, x2 - x1, y2 - y1)
 
+            # 注意：drawForeground 的 painter 使用的是 Scene 坐标系
+            # 这意味着我们可以直接用映射后的坐标画
+
             if self._tool == self.TOOL_RECT:
                 painter.drawRect(r)
             elif self._tool == self.TOOL_ELLIPSE:
@@ -1314,6 +1251,63 @@ class AnnotatableImageView(QGraphicsView):
             elif self._tool == self.TOOL_ARROW:
                 painter.drawLine(s, e)
 
+        # 2. 绘制放大镜
+        if self._tool == self.TOOL_MAGNIFIER and self._base_pix and self._mouse_scene_pos:
+            mx, my = self._mouse_scene_pos.x(), self._mouse_scene_pos.y()
+
+            # 确保鼠标在图片范围内才显示
+            if 0 <= mx <= self._base_pix.width() and 0 <= my <= self._base_pix.height():
+                # 放大镜的半径 (scene单位)
+                radius = self._magnifier_size / 2.0
+
+                # 源区域 (High Res Pixmap) 的 Rect
+                # 想要显示的区域宽度 = 放大镜尺寸 / 放大倍数
+                src_w = self._magnifier_size / self._magnifier_factor
+                src_h = self._magnifier_size / self._magnifier_factor
+                src_x = mx - src_w / 2
+                src_y = my - src_h / 2
+
+                source_rect = QRectF(src_x, src_y, src_w, src_h)
+
+                # 目标区域 (Scene Coordinates) - 以鼠标为中心
+                target_rect = QRectF(mx - radius, my - radius, self._magnifier_size, self._magnifier_size)
+
+                painter.save()
+                # 绘制圆形剪裁
+                path = QPainterPath()
+                path.addEllipse(target_rect)
+                painter.setClipPath(path)
+
+                # 填充背景防止透明
+                painter.fillRect(target_rect, Qt.GlobalColor.black)
+
+                # 绘制放大的图像部分
+                # drawPixmap(targetRect, pixmap, sourceRect)
+                painter.drawPixmap(target_rect, self._base_pix, source_rect)
+
+                # 绘制边框和十字准星
+                painter.setClipping(False)  # 边框不需要剪裁
+                painter.setPen(QPen(QColor("#FFFF00"), 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(target_rect)
+
+                # 准星
+                cross_len = 10
+                painter.drawLine(QPointF(mx - cross_len, my), QPointF(mx + cross_len, my))
+                painter.drawLine(QPointF(mx, my - cross_len), QPointF(mx, my + cross_len))
+
+                painter.restore()
+
+    def mousePressEvent(self, event):
+        # [新增] 2. 右键点击逻辑：如果是放大镜模式，右键直接取消
+        if self._tool == self.TOOL_MAGNIFIER and event.button() == Qt.MouseButton.RightButton:
+            self.tool_reset.emit()  # 发送信号给主界面
+            return
+
+        # ... (以下是原有代码，不用动)
+        if self._tool == self.TOOL_MAGNIFIER:
+            super().mousePressEvent(event)
+            return
 
 # ================= 新增类：问题快捷选择对话框 =================
 class IssueSelectionDialog(QDialog):
@@ -1522,7 +1516,7 @@ class MainWindow(QMainWindow):
         self.business_data = self.config.get("business_data", DEFAULT_BUSINESS_DATA)
 
     def init_ui(self):
-        self.setWindowTitle("普洱版纳区域检查报告助手（手动标注版）")
+        self.setWindowTitle("普洱版纳区域检查报告助手V1.1")
         self.resize(1320, 980)
 
         toolbar = QToolBar("Main")
@@ -1579,7 +1573,7 @@ class MainWindow(QMainWindow):
         export_menu.addAction(act_report_simple)
 
         btn_export_tool.setMenu(export_menu)
-        toolbar.addWidget(btn_export_tool) # 添加到工具栏
+        toolbar.addWidget(btn_export_tool)  # 添加到工具栏
 
         empty = QWidget()
         empty.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -1705,7 +1699,8 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
 
         # === 优化后的标注工具栏 (拆分为两行) ===
-        self.btn_tool_none = QPushButton("浏览")
+        self.btn_tool_none = QPushButton("缩放")
+        self.btn_tool_none.setToolTip("选中后：\n1. 滚动滚轮缩放图片\n2. 按住鼠标左键拖动图片")
         self.btn_tool_rect = QPushButton("框")
         self.btn_tool_ellipse = QPushButton("圈")
         self.btn_tool_arrow = QPushButton("箭头")
@@ -1713,18 +1708,25 @@ class MainWindow(QMainWindow):
         self.btn_tool_tag = QPushButton("🏷️引用问题")
         self.btn_tool_tag.setStyleSheet("color: blue; font-weight: bold;")
 
+        # 新增放大镜按钮
+        self.btn_tool_magnifier = QPushButton("🔍 放大镜")
+        self.btn_tool_magnifier.setCheckable(True)
+
         self.btn_undo = QPushButton("撤销")
         self.btn_clear_anno = QPushButton("清空")
         self.btn_save_marked = QPushButton("保存截图")
 
         all_btns = [
             self.btn_tool_none, self.btn_tool_rect, self.btn_tool_ellipse,
-            self.btn_tool_arrow, self.btn_tool_text, self.btn_tool_tag,
+            self.btn_tool_arrow, self.btn_tool_text, self.btn_tool_tag, self.btn_tool_magnifier,
             self.btn_undo, self.btn_clear_anno, self.btn_save_marked
         ]
         for b in all_btns:
             b.setMinimumHeight(28)
-            b.setFixedWidth(65)
+            if b != self.btn_tool_tag and b != self.btn_tool_magnifier:
+                b.setFixedWidth(65)
+            elif b == self.btn_tool_magnifier:
+                b.setFixedWidth(85)
 
         self.btn_tool_tag.setFixedWidth(80)
 
@@ -1736,6 +1738,7 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.btn_tool_arrow)
         row1.addWidget(self.btn_tool_text)
         row1.addWidget(self.btn_tool_tag)
+        row1.addWidget(self.btn_tool_magnifier)  # 添加到布局
         row1.addStretch()
 
         row2 = QHBoxLayout()
@@ -1790,13 +1793,31 @@ class MainWindow(QMainWindow):
         self.btn_tool_arrow.clicked.connect(lambda: self._set_tool(AnnotatableImageView.TOOL_ARROW))
         self.btn_tool_text.clicked.connect(lambda: self._set_tool(AnnotatableImageView.TOOL_TEXT))
         self.btn_tool_tag.clicked.connect(lambda: self._set_tool(AnnotatableImageView.TOOL_ISSUE_TAG))
+        self.btn_tool_magnifier.clicked.connect(self._toggle_magnifier_tool)
+        self.image_view.tool_reset.connect(lambda: self._set_tool(AnnotatableImageView.TOOL_NONE))
+
         self.btn_undo.clicked.connect(self._undo_annotation)
         self.btn_clear_anno.clicked.connect(self._clear_annotation)
         self.btn_save_marked.clicked.connect(self._save_marked_for_current_task)
 
     def _set_tool(self, tool: str):
         self.image_view.set_tool(tool)
+
+        # 更新放大镜按钮状态
+        self.btn_tool_magnifier.setChecked(tool == AnnotatableImageView.TOOL_MAGNIFIER)
+
         self.status_bar.showMessage(f"当前标注工具：{tool}")
+
+    def _toggle_magnifier_tool(self):
+        """
+        切换放大镜状态：
+        - 如果当前已经是放大镜，点击则取消（回到缩放模式）
+        - 如果当前不是放大镜，点击则开启
+        """
+        if self.image_view._tool == AnnotatableImageView.TOOL_MAGNIFIER:
+            self._set_tool(AnnotatableImageView.TOOL_NONE)
+        else:
+            self._set_tool(AnnotatableImageView.TOOL_MAGNIFIER)
 
     def _undo_annotation(self):
         self.image_view.undo()
