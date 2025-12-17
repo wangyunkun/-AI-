@@ -266,6 +266,13 @@ def _repair_common_json_issues(s: str) -> str:
         return s
     s = s.replace("\ufeff", "").strip()
     s = s.replace("“", "\"").replace("”", "\"").replace("‘", "'").replace("’", "'")
+
+    # 【新增修复】 自动补全对象之间缺失的逗号 (例如 } { 变为 }, { )
+    # 很多模型在列举大量数据时容易漏逗号
+    s = re.sub(r"}\s*{", "}, {", s)
+    s = re.sub(r"]\s*\[", "], [", s)
+
+    # 修复末尾多余的逗号
     s = re.sub(r",\s*([}\]])", r"\1", s)
     return s
 
@@ -1309,10 +1316,40 @@ class AnnotatableImageView(QGraphicsView):
             self.tool_reset.emit()
             return
 
-        # 2. 如果是 缩放/移动 模式，直接交给父类处理拖拽，不进行后续判断
+        # 2. 如果是【放大镜】模式，交给父类处理（不处理拖拽）
+        if self._tool == self.TOOL_MAGNIFIER:
+            super().mousePressEvent(event)
+            return
+
+        # 3. 如果是【缩放/浏览】模式 (TOOL_NONE)
+        # 此时我们需要利用之前设置的 setAcceptedMouseButtons(NoButton) 让事件穿透到底层
+        # 从而触发 QGraphicsView 自带的 ScrollHandDrag
         if self._tool == self.TOOL_NONE:
             super().mousePressEvent(event)
             return
+
+        # ==========================================================
+        # 4. 如果是【绘图】模式 (画框、圈、文字等)
+        # ==========================================================
+        if event.button() == Qt.MouseButton.LeftButton:
+            # 获取点击位置的图元
+            # 注意：因为我们把 _pix_item 设置为了 NoButton，itemAt 会忽略底图
+            # 这正是我们想要的：如果有标注则选中标注，没有标注则返回 None (代表点击在底图上)
+            item = self.itemAt(event.position().toPoint())
+
+            # 如果点击到了已有的标注（且不是底图），则优先让标注处理（比如选中、后续移动）
+            # 但如果你想实现“只要选了画笔，点击哪里都是画画”，可以将下面的 if item: 注释掉
+            if item and item != self._pix_item:
+                super().mousePressEvent(event)
+                return
+
+            # 开始绘图逻辑
+            self._dragging = True
+            self._start_img_pt = self._to_img_point(event.position().toPoint())
+            self._temp_end_img_pt = self._start_img_pt
+            return  # 拦截事件，不传给父类，确保不触发拖拽
+
+        super().mousePressEvent(event)
 
         # ... (以下是之前的绘图逻辑，保持不变)
         item = self.itemAt(event.position().toPoint())
