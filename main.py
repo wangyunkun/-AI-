@@ -802,6 +802,11 @@ class AnnotatableImageView(QGraphicsView):
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
         self._pix_item = QGraphicsPixmapItem()
+        # 【新增代码】关键修改：让背景图片不接收任何鼠标点击
+        # 这样点击图片时，事件会穿透到底层 View，从而触发 ScrollHandDrag 拖拽
+        self._pix_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+        self.scene().addItem(self._pix_item)
         # 必须设为不可移动，否则拖动标注时可能会误拖动底图
         self._pix_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
         self.scene().addItem(self._pix_item)
@@ -1299,15 +1304,18 @@ class AnnotatableImageView(QGraphicsView):
                 painter.restore()
 
     def mousePressEvent(self, event):
-        # [新增] 2. 右键点击逻辑：如果是放大镜模式，右键直接取消
+        # 1. 右键取消放大镜逻辑
         if self._tool == self.TOOL_MAGNIFIER and event.button() == Qt.MouseButton.RightButton:
-            self.tool_reset.emit()  # 发送信号给主界面
+            self.tool_reset.emit()
             return
 
-        # ... (以下是原有代码，不用动)
-        if self._tool == self.TOOL_MAGNIFIER:
+        # 2. 如果是 缩放/移动 模式，直接交给父类处理拖拽，不进行后续判断
+        if self._tool == self.TOOL_NONE:
             super().mousePressEvent(event)
             return
+
+        # ... (以下是之前的绘图逻辑，保持不变)
+        item = self.itemAt(event.position().toPoint())
 
 # ================= 新增类：问题快捷选择对话框 =================
 class IssueSelectionDialog(QDialog):
