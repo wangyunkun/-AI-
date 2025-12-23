@@ -1793,7 +1793,7 @@ class MainWindow(QMainWindow):
         self.business_data = self.config.get("business_data", DEFAULT_BUSINESS_DATA)
 
     def init_ui(self):
-        self.setWindowTitle("普洱版纳区域检查报告助手V1.1")
+        self.setWindowTitle("普洱版纳区域检查报告助手V2.0")
         self.resize(1320, 980)
 
         # ================= 1. 顶部工具栏 (Toolbar) =================
@@ -1835,7 +1835,8 @@ class MainWindow(QMainWindow):
         empty = QWidget()
         empty.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(empty)
-
+        self.act_help = QAction("❓ 帮助", self)
+        toolbar.addAction(self.act_help)
         self.act_setting = QAction("⚙ 设置", self)
         toolbar.addAction(self.act_setting)
 
@@ -1992,6 +1993,7 @@ class MainWindow(QMainWindow):
         self.act_pause.triggered.connect(self.pause_analysis)
         self.act_clear.triggered.connect(self.clear_queue)
         self.act_setting.triggered.connect(self.open_settings)
+        self.act_help.triggered.connect(self.show_help)
         self.act_report_check.triggered.connect(lambda: self.export_word("检查模板.docx"))
         self.act_report_notice.triggered.connect(lambda: self.export_word("通知单模板.docx"))
         self.act_report_simple.triggered.connect(lambda: self.export_word("简报模板.docx"))
@@ -2031,6 +2033,68 @@ class MainWindow(QMainWindow):
     def _set_tool(self, tool: str):
         self.image_view.set_tool(tool)
 
+    def show_help(self):
+        help_content = """
+        <h3>普洱版纳区域检查报告助手 使用说明</h3>
+        <p>本工具旨在辅助用户快速生成包含 AI 辅助分析和人工标注的检查报告。</p>
+
+        <h4><strong>一、 基本操作流程</strong></h4>
+        <ol>
+            <li><strong>添加图片</strong>：点击工具栏的“➕ 添加图片”按钮，选择要分析的现场照片。图片会加入左侧的任务队列。</li>
+            <li><strong>填写报告信息</strong>：在“报告基础信息”区域填写检查所需的各项内容，如项目公司、项目名称、检查人员、检查日期等。</li>
+            <li><strong>选择场景模式</strong>：在工具栏的“场景模式”下拉框中选择合适的 AI 分析模型提示词（如“施工全能扫描”）。</li>
+            <li><strong>开始分析</strong>：点击工具栏的“▶ 开始分析”按钮，AI 将对队列中的图片进行分析。分析进度会在底部状态栏显示。</li>
+            <li><strong>查看与编辑结果</strong>：
+                <ul>
+                    <li>点击左侧队列中的图片项，右侧将显示图片和 AI 识别出的问题列表。</li>
+                    <li>每个问题都以“卡片”形式展现，可点击“编辑”按钮修改问题描述、风险等级、整改建议等，也可删除不准确的问题。</li>
+                </ul>
+            </li>
+            <li><strong>人工标注（可选）</strong>：
+                <ul>
+                    <li>在图片预览区上方有绘图工具（框、圈、箭头、文字）。选择工具后，可在图片上直接进行手绘标注。</li>
+                    <li>“🏷️引用问题”工具允许您在图片上添加文字标注，内容可从 AI 识别的问题列表中选择，方便快速关联。</li>
+                    <li>“🤖 自动标识”按钮可以一键将所有 AI 识别出的、带有坐标的问题自动在图片上生成序号标注。</li>
+                    <li>“撤销”、“删除选中”、“清空”用于管理您的标注。</li>
+                    <li>点击“保存截图”可将当前带标注的图片保存为PNG文件，用于报告输出。</li>
+                </ul>
+            </li>
+            <li><strong>导出报告</strong>：点击工具栏的“📄 导出报告”按钮，选择合适的报告模板（通用检查报告、整改通知单、简报模式），然后选择保存路径，即可生成 Word 报告。报告将包含所有问题描述和带有标注的图片。</li>
+        </ol>
+
+        <h4><strong>二、 高级设置（⚙ 按钮）</strong></h4>
+        <ul>
+            <li><strong>连接设置</strong>：配置 AI 模型厂商（如阿里百炼、硅基流动等）、API Key、Base URL、模型名称。您也可以选择“自定义”来设置任何兼容 OpenAI API 的服务。同时可设置最大并发数、重试次数和temperature。</li>
+            <li><strong>提示词编辑</strong>：可查看和修改不同场景模式下，提供给 AI 的具体分析提示词。高级用户可根据需求调整，以获得更符合期望的分析结果。</li>
+            <li><strong>业务数据配置</strong>：以 JSON 格式维护公司、项目、检查内容和项目概况等数据。这些数据会用于报告的基础信息填充。请确保 JSON 格式正确。</li>
+            <li><strong>诊断</strong>：查看最近使用的检查人员和检查部位历史记录。</li>
+        </ul>
+
+        <h4><strong>三、 提示与注意事项</strong></h4>
+        <ul>
+            <li>为保证运行稳定，单次排查请控制在 {MAX_IMAGES} 张图片以内。</li>
+            <li>AI 分析依赖于其识别能力，结果可能不完全准确，请务必人工复核和编辑。</li>
+            <li>请确保在程序目录下存在所需的 Word 模板文件（如 `检查模板.docx`）。若缺失，报告将使用空白格式生成。</li>
+            <li>“暂停”功能只会停止新任务的排队，正在分析中的任务仍会继续完成。</li>
+            <li>“重试失败”功能可重新尝试分析状态为“失败”的任务。</li>
+        </ul>
+        """
+        # 使用 QDialog 来展示 HTML 内容，提供更好的排版和滚动
+        help_dialog = QDialog(self)
+        help_dialog.setWindowTitle("帮助信息")
+        help_dialog.resize(800, 700)
+
+        dialog_layout = QVBoxLayout(help_dialog)
+        text_browser = QTextEdit()
+        text_browser.setHtml(help_content.format(MAX_IMAGES=MAX_IMAGES))  # 格式化MAX_IMAGES
+        text_browser.setReadOnly(True)
+        dialog_layout.addWidget(text_browser)
+
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(help_dialog.accept)
+        dialog_layout.addWidget(close_button)
+
+        help_dialog.exec()
 
     def _undo_annotation(self):
         self.image_view.undo()
